@@ -1,123 +1,193 @@
 local M = {}
 
+local function h(props)
+  return function(children)
+    local t = type(children)
+    local n = {
+      props = props or {},
+    }
+    if t == 'string' then n.text = children
+    elseif t == 'function' then n.render = function(_) return children() end
+    else n.children = children end
+    return n
+  end
+end
+
+local function defn(fnable)
+  if type(fnable) == 'function' then
+    return fnable()
+  end
+  return fnable
+end
+
+local function group(opt)
+  local b0 = {}
+  local b1 = {}
+  table.insert(b0, '%')
+  if opt.align_left and defn(opt.align_left) then
+    table.insert(b0, '-')
+  end
+  if opt.min_width then
+    table.insert(b0, defn(opt.min_width))
+  end
+  if opt.max_width then
+    table.insert(b0, '.' .. defn(opt.max_width))
+  end
+  table.insert(b0, '(')
+  table.insert(b1, '%)')
+  return {
+    pre = table.concat(b0),
+    post = table.concat(b1),
+  }
+end
+
+local function fmt(opt)
+  local b0 = {}
+  local b1 = {}
+  local m = { 0, 0 }
+  local p = { 0, 0 }
+  if opt.margin then
+    m = defn(opt.margin)
+    if type(m) == 'number' then
+      m = { m, m }
+    end
+  end
+  if opt.padding then
+    p = defn(opt.padding)
+    if type(p) == 'number' then
+      p = { p, p }
+    end
+  end
+  table.insert(b0, string.rep(' ', m[1]))
+  local hi = defn(opt.highlight)
+  if hi then
+    table.insert(b0, '%#' .. hi .. '#')
+  end
+  table.insert(b0, string.rep(' ', p[1]))
+  table.insert(b1, string.rep(' ', p[2]))
+  local hir = defn(opt.reset_highlight)
+  if hir then
+    table.insert(b1, '%#' .. hir .. '#')
+  end
+  table.insert(b1, string.rep(' ', m[2]))
+  return {
+    pre = table.concat(b0),
+    post = table.concat(b1),
+  }
+end
+
+local function render(node)
+  local o = {}
+  if not node then
+    return ''
+  end
+  local g = nil
+  if node.props and node.props.group then
+    g = group(defn(node.props.group))
+    table.insert(o, g.pre)
+  end
+  local f = nil
+  if node.props and node.props.fmt then
+    f = fmt(defn(node.props.fmt))
+    table.insert(o, f.pre)
+  end
+  if node.text then
+    table.insert(o, node.text)
+  elseif node.render then
+    table.insert(o, node:render())
+  elseif node.children then
+    for _, v in ipairs(node.children) do
+      table.insert(o, render(v))
+    end
+  else
+    -- fragments
+    for _, v in ipairs(node) do
+      table.insert(o, render(v))
+    end
+  end
+  if f then
+    table.insert(o, f.post)
+  end
+  if g then
+    table.insert(o, g.post)
+  end
+  return table.concat(o)
+end
+
+local function render_cond(cond_node)
+  if cond_node.data.cond() then
+    return render(cond_node.data.true_case)
+  else
+    return render(cond_node.data.false_case)
+  end
+end
+
+function M.if_(cond)
+  return function(true_case)
+    local n = {
+      name = 'Cond',
+      data = {
+        cond = cond,
+        true_case = true_case,
+        false_case = nil,
+      },
+      render = render_cond,
+    }
+    n.else_ = function(self, false_case)
+      self.data.false_case = false_case
+      return self
+    end
+    return n
+  end
+end
+
 local defaults = {
-  context = {
-    defaults = {
-      padding = { '', '|', '' },
-      margin = { ' ', ' ' },
-    },
-  },
   tabline = {},
   statusline = {
-    active = { '%f' },
-    inactive = { '%f' },
+    h {} '%f',
   },
 }
+local config = {}
 
-local function make_block(ctx, _, block)
-  local t = type(block)
-  local l = ''
-  if t == 'function' then
-    block = block()
-    t = type(block)
-  end
-  if t == 'table' then
-    if block.align then
-      l = l .. ' %=%<'
-    end
-    if block.highlight then
-      local th = type(block.highlight)
-      if th == 'string' then
-        l = l .. '%#' .. block.highlight .. '#'
-      elseif th == 'function' then
-        l = l .. '%#' .. block.highlight(ctx) .. '#'
-      else
-        l = l .. '%#' .. string(block.highlight) .. '#'
-      end
-    end
-  end
-  local m = block.margin or ctx.defaults.margin
-  local o = block.group_opt or ''
-  l = l .. '%' .. o .. '(' .. m[1]
-  if t == 'table' then
-    if block.text then
-      local tt = type(block.text)
-      if tt == 'function' then
-        l = l .. block.text()
-      elseif tt == 'string' then
-        l = l .. block.text
-      else
-        l = l .. string(block.text)
-      end
-    elseif block.spans then
-      local p = block.padding or ctx.defaults.padding
-      l = l .. p[1]
-      for i, span in pairs(block.spans) do
-        l = l .. make_block(ctx, i, span)
-        if next(block.spans, i) == nil then
-          l = l .. p[3]
-        else
-          l = l .. p[2]
-        end
-      end
-    end
-  elseif t == 'string' then
-    l = l .. block
-  else
-    l = l .. string(block)
-  end
-  return l .. m[2] .. '%)'
+function M.setup(user_config)
+  config = vim.tbl_deep_extend('force', defaults, user_config)
+  M.reset()
 end
 
-local function make_line(ctx, blocks)
-  local l = ''
-  for name, block in pairs(blocks) do
-    l = l .. make_block(ctx, name, block)
+function M.reset()
+  _G.ZeroLineStatusLine = function(active)
+    local c = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_var(0, 'window_is_active', active)
+    return render(config.statusline)
   end
-  return l
-end
-
-function M.init(user_config)
-  local config = vim.deepcopy(defaults)
-  config = vim.tbl_deep_extend('force', config, user_config)
-
-  _G._lualine_state = {
-    tabline = function()
-      return make_line(config.context, config.tabline)
-    end,
-    statusline = {
-      active = function()
-        return make_line(config.context, config.statusline.active)
-      end,
-      inactive = function()
-        return make_line(config.context, config.statusline.inactive)
-      end,
-    },
-  }
-  local group = vim.api.nvim_create_augroup('LuaLine', { clear = true })
+  _G.ZeroLineTabLine = function()
+    return render(config.tabline)
+  end
+  local group = vim.api.nvim_create_augroup('ZeroLine', { clear = true })
   vim.api.nvim_create_autocmd({ 'BufEnter', 'WinEnter' }, {
     group = group,
     pattern = { '*' },
     callback = function ()
-      vim.wo.statusline = [[%!v:lua._lualine_state.statusline.active()]]
+      vim.wo.statusline = [[%!v:lua.ZeroLineStatusLine(v:true)]]
     end
   })
   vim.api.nvim_create_autocmd({ 'BufLeave', 'WinLeave' }, {
     group = group,
     pattern = { '*' },
     callback = function ()
-      vim.wo.statusline = [[%!v:lua._lualine_state.statusline.inactive()]]
+      vim.wo.statusline = [[%!v:lua.ZeroLineStatusLine(v:false)]]
     end
   })
   vim.api.nvim_create_autocmd({ 'BufEnter', 'WinEnter', 'DirChanged' }, {
     group = group,
     pattern = { '*' },
     callback = function ()
-      vim.o.tabline = [[%!v:lua._lualine_state.tabline()]]
+      vim.o.tabline = [[%!v:lua.ZeroLineTabLine()]]
     end
   })
 end
 
-M.setup = M.init
+M.h = h
+M.render = render
 
 return M
